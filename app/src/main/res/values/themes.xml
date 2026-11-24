@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="neon_bg">#0A0614</color>
+
+    <style name="Theme.NeonPlayer" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/neon_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

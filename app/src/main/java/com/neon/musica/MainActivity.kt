@@ -58,12 +58,26 @@ private fun AppRoot(vm: PlayerViewModel = viewModel()) {
         granted = it
     }
 
+    // Permiso de notificaciones (Android 13+), necesario para ver los controles de música.
+    val notificationLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     LaunchedEffect(Unit) {
         if (!granted) launcher.launch(permission)
     }
 
     LaunchedEffect(granted) {
-        if (granted) vm.load()
+        if (granted) {
+            vm.load()
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 
     PlayerScreen(

@@ -1,36 +1,32 @@
 package com.neon.musica
 
 import android.app.Application
+import android.content.ComponentName
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.AudioAttributes
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
+import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * Ya no reproduce la música directamente: se conecta al PlaybackService
+ * (mediante un MediaController) para que el sonido siga en segundo plano.
+ */
 class PlayerViewModel(app: Application) : AndroidViewModel(app) {
-
-    private val player: ExoPlayer = ExoPlayer.Builder(app)
-        .setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(C.USAGE_MEDIA)
-                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                .build(),
-            true
-        )
-        .setHandleAudioBecomingNoisy(true)
-        .setWakeMode(C.WAKE_MODE_LOCAL)
-        .build()
 
     var songs by mutableStateOf<List<Song>>(emptyList())
         private set
@@ -54,44 +50,73 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     private var loaded = false
+    private var player: Player? = null
+    private val ready = CompletableDeferred<Player>()
+    private val controllerFuture: ListenableFuture<MediaController>
+
+    private val listener = object : Player.Listener {
+        override fun onEvents(player: Player, events: Player.Events) {
+            syncFrom(player)
+        }
+    }
 
     init {
-        player.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                this@PlayerViewModel.isPlaying = isPlaying
-            }
-
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                currentIndex = player.currentMediaItemIndex
-                positionMs = 0L
-                durationMs = player.duration.coerceAtLeast(0L)
-            }
-
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_READY) {
-                    durationMs = player.duration.coerceAtLeast(0L)
+        val token = SessionToken(app, ComponentName(app, PlaybackService::class.java))
+        controllerFuture = MediaController.Builder(app, token).buildAsync()
+        controllerFuture.addListener(
+            {
+                try {
+                    val controller = controllerFuture.get()
+                    controller.addListener(listener)
+                    player = controller
+                    syncFrom(controller)
+                    ready.complete(controller)
+                } catch (e: Exception) {
+                    ready.completeExceptionally(e)
                 }
-            }
-
-            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
-                shuffle = shuffleModeEnabled
-            }
-
-            override fun onRepeatModeChanged(repeatMode: Int) {
-                this@PlayerViewModel.repeatMode = repeatMode
-            }
-        })
+            },
+            ContextCompat.getMainExecutor(app)
+        )
 
         // Actualiza la barra de progreso 4 veces por segundo.
         viewModelScope.launch {
             while (true) {
-                positionMs = player.currentPosition.coerceAtLeast(0L)
-                if (durationMs <= 0L) {
-                    durationMs = player.duration.coerceAtLeast(0L)
+                player?.let { p ->
+                    positionMs = p.currentPosition.coerceAtLeast(0L)
+                    if (durationMs <= 0L) {
+                        durationMs = p.duration.coerceAtLeast(0L)
+                    }
                 }
                 delay(250)
             }
         }
+    }
+
+    private fun syncFrom(p: Player) {
+        isPlaying = p.isPlaying
+        currentIndex = if (p.mediaItemCount > 0) p.currentMediaItemIndex else -1
+        durationMs = p.duration.coerceAtLeast(0L)
+        shuffle = p.shuffleModeEnabled
+        repeatMode = p.repeatMode
+    }
+
+    private fun Song.toMediaItem(): MediaItem =
+        MediaItem.Builder()
+            .setMediaId(id.toString())
+            .setUri(uri)
+            .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(uri).build())
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setArtist(artist)
+                    .setArtworkUri(artworkUri)
+                    .build()
+            )
+            .build()
+
+    private fun sameQueue(p: Player, list: List<Song>): Boolean {
+        if (p.mediaItemCount != list.size) return false
+        return list.indices.all { p.getMediaItemAt(it).mediaId == list[it].id.toString() }
     }
 
     fun load() {
@@ -106,50 +131,64 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 loaded = false // permite volver a intentar
                 return@launch
             }
-            player.setMediaItems(list.map { MediaItem.fromUri(it.uri) })
-            player.prepare()
-            currentIndex = player.currentMediaItemIndex
+
+            val p = try {
+                ready.await()
+            } catch (e: Exception) {
+                loaded = false
+                return@launch
+            }
+
+            // Si el servicio ya tenía esta misma lista sonando, no la reiniciamos.
+            if (!sameQueue(p, list)) {
+                p.setMediaItems(list.map { it.toMediaItem() })
+                p.prepare()
+            }
+            syncFrom(p)
         }
     }
 
     fun playSong(index: Int) {
+        val p = player ?: return
         if (index !in songs.indices) return
-        player.seekTo(index, 0L)
-        player.play()
+        p.seekTo(index, 0L)
+        p.play()
     }
 
     fun togglePlayPause() {
+        val p = player ?: return
         if (songs.isEmpty()) return
         when {
-            player.playbackState == Player.STATE_ENDED -> {
-                player.seekTo(0, 0L)
-                player.play()
+            p.playbackState == Player.STATE_ENDED -> {
+                p.seekTo(0, 0L)
+                p.play()
             }
-            player.isPlaying -> player.pause()
-            else -> player.play()
+            p.isPlaying -> p.pause()
+            else -> p.play()
         }
     }
 
     fun next() {
-        player.seekToNextMediaItem()
+        player?.seekToNextMediaItem()
     }
 
     fun previous() {
-        // Si ya pasaron unos segundos, reinicia la canción; si no, va a la anterior.
-        player.seekToPreviousMediaItem()
+        player?.seekToPreviousMediaItem()
     }
 
     fun seekTo(ms: Long) {
-        player.seekTo(ms)
+        player?.seekTo(ms)
         positionMs = ms
     }
 
     fun toggleShuffle() {
-        player.shuffleModeEnabled = !player.shuffleModeEnabled
+        val p = player ?: return
+        p.shuffleModeEnabled = !p.shuffleModeEnabled
     }
 
     fun cycleRepeat() {
-        player.repeatMode = when (player.repeatMode) {
+        val p = player ?: return
+        p.repeatMode = when (p.repeatMode) {
             Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
             Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
             else -> Player.REPEAT_MODE_OFF
@@ -157,7 +196,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
-        player.release()
+        // Solo suelta la conexión: el servicio sigue tocando si hay música sonando.
+        MediaController.releaseFuture(controllerFuture)
         super.onCleared()
     }
 }

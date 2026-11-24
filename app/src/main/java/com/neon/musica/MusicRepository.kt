@@ -2,9 +2,12 @@ package com.neon.musica
 
 import android.content.ContentUris
 import android.content.Context
+import android.net.Uri
 import android.provider.MediaStore
 
 object MusicRepository {
+
+    private val albumArtBase: Uri = Uri.parse("content://media/external/audio/albumart")
 
     /** Lee las canciones guardadas en el teléfono (MediaStore). */
     fun loadSongs(context: Context): List<Song> {
@@ -15,6 +18,7 @@ object MusicRepository {
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.TITLE,
             MediaStore.Audio.Media.ARTIST,
+            MediaStore.Audio.Media.ALBUM_ID,
             MediaStore.Audio.Media.DURATION
         )
 
@@ -27,10 +31,12 @@ object MusicRepository {
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
             val titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
             val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+            val albumIdCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
             val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
+                val albumId = cursor.getLong(albumIdCol)
                 val artist = cursor.getString(artistCol)
                     ?.takeIf { it.isNotBlank() && it != "<unknown>" }
                     ?: "Artista desconocido"
@@ -40,6 +46,7 @@ object MusicRepository {
                     title = cursor.getString(titleCol) ?: "Sin título",
                     artist = artist,
                     uri = ContentUris.withAppendedId(collection, id),
+                    artworkUri = ContentUris.withAppendedId(albumArtBase, albumId),
                     durationMs = cursor.getLong(durationCol)
                 )
             }

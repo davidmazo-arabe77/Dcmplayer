@@ -7,5 +7,6 @@ data class Song(
     val title: String,
     val artist: String,
     val uri: Uri,
+    val artworkUri: Uri,
     val durationMs: Long
 )
